@@ -494,12 +494,448 @@ Messenger的使用方法很简单，他对AIDL做了封装。同时，它由于�
 
 1.服务端进程：
 
+首先，我们需要在服务端创建一个Service来处理客户端的连接请求，同时创建一个Handler并通过它来创建一个Messenger对象，然后再Service的onBinder中返回
+这个Messenger对象底层的Binder即可。
+
+2.客户端进程：
+（1）首先要绑定服务端的Service
+（2）绑定成功后用服务端返回的Binder对象创建一个Messenger
+（3）通过这个Messenger就可以向服务端发送消息了，发送消息类型为Message对象
+（4）如果需要服务端能够回应客户端，，就和服务端一样，我们还需要创建一个Handler并创建一个新的Messenger，并把这个Messenger对象通过Message
+的replyTo参数传递给服务端，服务端通过这个replyTo参数就可以回应客户端。
+
+下面看服务端的代码：
+
+            public class MessengerService extends Service {
+                private static final String TAG = "MessengerService";
+
+                //通过MessengerHandler创建Messenger对象
+                private final Messenger mMessenger = new Messenger(new MessengerHandler());
+
+                private static class MessengerHandler extends Handler{
+                    @Override
+                    public void handleMessage(Message msg) {
+                        switch (msg.what){
+                            case MyConstants.MSG_FROM_CLIENT:
+                                Log.i(TAG,"receiver msg from Client:"+msg.getData().getString("msg"));
+
+                                //回复客户端发送来的内容
+                                //1. 通过接收到的到客户端的Message对象获取到Messenger信使
+                                Messenger client = msg.replyTo;
+                                // 2. 创建一个信息Message对象,并把一些数据加入到这个对象中
+                                Message replyMessage = Message.obtain(null,MyConstants.MSG_FROM_SERVICE);
+                                Bundle bundle = new Bundle();
+                                bundle.putString("reply","嗯，你的消息我已经收到，稍后会回复你。");
+                                replyMessage.setData(bundle);
+
+                                // 3. 通过信使Messenger发送封装好的Message信息
+                                try {
+                                    client.send(replyMessage);
+                                } catch (RemoteException e) {
+                                    e.printStackTrace();
+                                }
+                        }
+                    }
+                }
+
+                @Override
+                public IBinder onBind(Intent intent) {
+                    //返回Messenger中binder对象
+                    return mMessenger.getBinder();
+                }
+            }
+
+客户端代码：
+
+            public class MessengerActivity extends AppCompatActivity {
+
+                private static final String TAG = "MessengerActivity";
+
+                private Messenger mService;
+
+                private ServiceConnection mServiceConnection = new ServiceConnection() {
+                    @Override
+                    public void onServiceConnected(ComponentName name, IBinder service) {
+                        //根据服务端返回的binder创建Messenger对象
+                        mService = new Messenger(service);
+
+                        Message msg = Message.obtain(null, MyConstants.MSG_FROM_CLIENT);
+                        Bundle data = new Bundle();
+                        data.putString("msg","hello,this is client.");
+                        msg.setData(data);
+
+                        //很关键的一点，当客户端发送消息时，需要把接收服务端回复的Messenger通过Message的replyTo参数传递给服务端
+                        // 需要把接收服务端回复的Messenger通过Message的replyTo传递给服务端
+                        msg.replyTo = mGetReplyMessenger;
+
+                        try {
+                            //Messenger发送消息给服务端，消息类型为message对象
+                            mService.send(msg);
+                        } catch (RemoteException e) {
+                            e.printStackTrace();
+                        }
+                    }
+
+                    @Override
+                    public void onServiceDisconnected(ComponentName name) {
+
+                    }
+                };
+
+                //接收服务端消息的Messenger
+                private Messenger mGetReplyMessenger = new Messenger(new MessengerHandler());
+                //接收服务端消息的Handler
+                private class MessengerHandler extends Handler{
+                    @Override
+                    public void handleMessage(Message msg) {
+                        switch (msg.what){
+                            case MyConstants.MSG_FROM_SERVICE:
+                                Log.i(TAG,"receive msg from Service:"+msg.getData().getString("reply"));
+                                break;
+                        }
+                    }
+                }
+
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    setContentView(R.layout.activity_messenger);
+
+                    Intent intent = new Intent(this,MessengerService.class);
+                    bindService(intent,mServiceConnection, Context.BIND_AUTO_CREATE);
+                }
+
+                @Override
+                protected void onDestroy() {
+                    unbindService(mServiceConnection);
+                    super.onDestroy();
+                }
+            }
+
+
+总结一下Messenger的工作原理：
+
+客户端通过服务端传递过来的IBinder构造一个Messenger对象，然后Messenger通过Messenger.send(msg)发送消息给服务端，消息类型为message对象，如果
+希望服务端还能回应客户端，就在msg中通过msg.replyTo = Messenger再封装一个Messenger对象，服务端再通过Messenger= msg.replyTo取出这个Messenger
+对象，再通过这个Messenger对象发消息给客户端。
+
+
+
+4.使用AIDL
+
+Messenger是以串行的方式处理客户端发来的消息，如果大量的消息同时发送到服务端，服务端也只能一个个处理，如果大量的并发请求，那么用Messenger就不太
+合适了，这时我们可以使用AIDL来实现跨进程的方法调用，先介绍AIDL来进行进程间通信的流程，分为服务端和客户端：
+
+（1）.服务端：
+首先要创建一个Service用来监听客户端的连接请求，然后创建一个AIDL文件，将暴露给客户端的接口在这个AIDL文件中声明，最后在Service中实现这个AIDL接口。
+
+（2）.客户端：
+首先需要绑定服务端的Service，绑定成功后，将服务端返回的Binder对象转成AIDL接口所属的类型，接着就可以调用AIDL中的方法了。
+
+
+（3）.AIDL接口的创建：
+
+            // IBookManager.aidl
+            package com.example.saber.aidlbindertest.aidl;
+
+            import com.example.saber.aidlbindertest.aidl.Book;
+            import com.example.saber.aidlbindertest.aidl.IOnNewBookArrivedListener;
+
+            interface IBookManager {
+                    List<Book> getBookList();//从远程服务器获取图书列表
+                    void addBook(in Book book);//往图书列表中添加一本书
+
+                    void registerListener(IOnNewBookArrivedListener listener);//注册接口
+                    void unregisterListener(IOnNewBookArrivedListener listener);//注销接口
+            }
+
+AIDL文件所支持的数据类型：
+（1）基本数据类型
+（2）String和CharSequence
+（3）List，只支持ArrayList，里面每个元素都必须能被AIDL支持
+（4）Map，只支持HashMap，里面每个元素都必须被AIDL支持
+（5）Parcelable：所有实现了Parcelable接口的对象
+（6）AIDL,所有的AIDL接口本身也可以在AIDL文件中使用
+
+注意：（1）其中自定义的Parcelable对象和AIDl对象必须要显示import进来。
+（2）如果AIDL文件中用到了自定义的Parcelable对象，那么必须新建一个和它同名的AIDL文件，并在其中声明他为Parcelable类型：
+            
+            // Book1.aidl
+            package com.example.saber.aidlbindertest.aidl;
+            parcelable Book;
+
+（3）AIDL中除了基本类型，其他类型参数必须标上方向：in，out或者inout，in表示输入型参数，out表示输出型参数，inout表示输入输出型参数。
+
+
+（4）.远程服务端Service的实现：
+
+            public class BookManagerService extends Service {
+
+                private static final String TAG = "BookManagerService";
+
+                //在这个Boolean值的变化的时候不允许在之间插入，保持操作的原子性.用于多线程
+                private AtomicBoolean mIsServiceDestoryed = new AtomicBoolean(false);
+
+                //并发读写的集合
+                private CopyOnWriteArrayList<Book> mBookList = new CopyOnWriteArrayList<>();
+
+                //系统专门提供的用于删除跨进程listener接口，，内部有一个map，key是binder，value是callback
+                private RemoteCallbackList<IOnNewBookArrivedListener> mListenerList = new RemoteCallbackList<>();
+
+
+                private Binder mBinder = new IBookManager.Stub(){
+
+                    @Override
+                    public List<Book> getBookList() throws RemoteException {
+                        return mBookList;
+                    }
+
+                    @Override
+                    public void addBook(Book book) throws RemoteException {
+                        mBookList.add(book);
+                    }
+
+                    @Override
+                    public void registerListener(IOnNewBookArrivedListener listener) throws RemoteException {
+                        mListenerList.register(listener);
+
+                        int N = mListenerList.beginBroadcast();
+                        mListenerList.finishBroadcast();
+                        Log.d(TAG,"registerListener,current size:"+N);
+                    }
+
+                    @Override
+                    public void unregisterListener(IOnNewBookArrivedListener listener) throws RemoteException {
+                        mListenerList.unregister(listener);
+
+                        Log.d(TAG,"unregister success.");
+                        int N = mListenerList.beginBroadcast();
+                        mListenerList.finishBroadcast();
+                        Log.d(TAG,"unregisterListener,current size:"+mListenerList.beginBroadcast());
+                    }
+                };
+
+                @Override
+                public IBinder onBind(Intent intent) {
+                    //onBind中验证权限
+                    int check = checkCallingOrSelfPermission("com.example.saber.aidlbindertest.permission.ACCESS_BOOK_SERVICE");
+                    if(check == PackageManager.PERMISSION_DENIED){
+                        return null;
+                    }
+
+                    return mBinder;
+                }
+
+                @Override
+                public void onCreate() {
+                    super.onCreate();
+
+                    mBookList.add(new Book(1,"Android"));
+                    mBookList.add(new Book(2,"Ios"));
+
+                    new Thread(new ServiceWorker()).start();
+
+                }
+
+                private class ServiceWorker implements Runnable{
+
+                    @Override
+                    public void run() {
+                        //每隔5s检查一次有没有新书
+                        while(!isDeviceProtectedStorage()){
+                            try {
+                                Thread.sleep(5000);
+
+                                int bookId = mBookList.size()+1;
+                                Book newBook = new Book(bookId,"new book#"+bookId);
+
+                                //有新书来了发送通知
+                                try {
+                                    onNewBookArrived(newBook);
+                                } catch (RemoteException e) {
+                                    e.printStackTrace();
+                                }
+
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }
+
+                /**
+                 * 有新书来了，通知所有客户端
+                 * @param newBook
+                 */
+                private void onNewBookArrived(Book newBook) throws RemoteException {
+
+                    mBookList.add(newBook);
+
+                    //RemoteCallbackList的总数
+                    final int N = mListenerList.beginBroadcast();
+                    for(int i=0;i<N;i++){
+                        IOnNewBookArrivedListener listener = mListenerList.getBroadcastItem(i);
+                        if(listener != null){
+                            listener.onNewBookArrived(newBook);
+                        }
+                    }
+                    //beginBroadcast()必须和finishBroadcast()配对使用
+                    mListenerList.finishBroadcast();
+
+                }
+
+                @Override
+                public void onDestroy() {
+                    //标记service已经销毁
+                    mIsServiceDestoryed.set(true);
+                    super.onDestroy();
+                }
+            }
+
+AIDL方法是在服务端的Binder线程池中进行的，因此当多个客户端同时连接的时候，需要进行线程同步。这里使用CopyOnWriteArrayList进行自动的线程同步。
+
+
+（5）.客户端的实现：
+
+            public class BookManagerActivity extends AppCompatActivity {
+
+                private static final String TAG = "BookManagerActivity";
+
+                private static final int MESSAGE_NEW_BOOK_ARRIVED = 1;
+
+                private IBookManager bookManager;
+
+                private ServiceConnection mServiceConnection = new ServiceConnection() {
+                    @Override
+                    public void onServiceConnected(ComponentName name, IBinder service) {
+
+                        //将服务端返回的binder转换成AIDL接口
+                        bookManager = IBookManager.Stub.asInterface(service);
+
+                        try {
+                            //获取图书
+                            List<Book> bookList = bookManager.getBookList();
+                            Log.i(TAG,bookList.getClass().getCanonicalName());
+                            Log.i(TAG,"query the booklist:"+bookList.toString());
+
+                            //添加新书
+                            bookManager.addBook(new Book(3,"Android开发艺术探索"));
+                            List<Book> newBookList = bookManager.getBookList();
+                            Log.i(TAG,"query the newBookList:"+newBookList.toString());
+
+                            //客户端注册接口
+                            bookManager.registerListener(mOnNewBookArrivedListener);
+
+                        } catch (RemoteException e) {
+                            e.printStackTrace();
+                        }
+
+                    }
+
+                    @Override
+                    public void onServiceDisconnected(ComponentName name) {
+                        bookManager = null;
+                        Log.e(TAG,"binder died");
+                    }
+                };
+
+                private Handler mHandler = new Handler(){
+                    @Override
+                    public void handleMessage(Message msg) {
+                        switch (msg.what){
+                            case MESSAGE_NEW_BOOK_ARRIVED:
+                                Log.d(TAG,"receive new book:"+msg.obj);
+                                break;
+                        }
+                    }
+                };
+
+                //服务端在客户端的回调方法
+                private IOnNewBookArrivedListener mOnNewBookArrivedListener = new IOnNewBookArrivedListener.Stub() {
+                    @Override
+                    public void onNewBookArrived(Book book) throws RemoteException {
+                        //服务端在客户端的回调
+                        mHandler.obtainMessage(MESSAGE_NEW_BOOK_ARRIVED,book).sendToTarget();
+
+                    }
+                };
+
+
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    setContentView(R.layout.activity_book_manager);
+
+                    Intent intent = new Intent(this,BookManagerService.class);
+                    bindService(intent,mServiceConnection, Context.BIND_AUTO_CREATE);
+                }
+
+                @Override
+                protected void onDestroy() {
+
+                    //销毁时注销接口
+                    if(bookManager != null && bookManager.asBinder().isBinderAlive()){
+
+                        Log.i(TAG,"unregister listener:"+mOnNewBookArrivedListener);
+                        try {
+                            bookManager.unregisterListener(mOnNewBookArrivedListener);
+                        } catch (RemoteException e) {
+                            e.printStackTrace();
+                        }
+
+                    }
+                    unbindService(mServiceConnection);
+
+                    super.onDestroy();
+                }
+            }
+
+
+AIDL中无法使用普通接口，因为跨进程BInder会把客户端传递过来的对象重新转化生成一个新的对象，对象是不能跨进程传输的，对象的跨进程传输本质上是反序列化的
+过程。
+
+RemoteCallbackList是系统专门提供的用于删除跨进程listener的接口。它的工作原理很简单，在它内部有一个Map结构专门用来保存所有的AIDL回调，这个Map
+的key是IBinder类型，value是Callback类型。对象不同，但是底层的Binder是同一个，利用这个特性只要找出那个和注册listener具有相同Binder对象的服务端
+listener删掉即可。另外RemoteCallbackList内部自动实现了线程同步功能。
+
+注意：遍历RemoteCallbackList时，我们不能像List一样去操作它，其中beginBroadcast和finishBroadcast必须要配对使用。哪怕我们仅仅要获取它的个数。
+
+1.若服务端是耗时操作，客户端调用服务端的方法时，应该开工作线程。
+2.服务端的方法本身就运行在Binder线程池中，不需要再服务端开工作线程。
+
+设置死亡代理和inServiceDisconnect的区别：一个运行在主线程一个运行在Binder线程池中。
+
+
+
+
+（6）.AIDL的权限认证：
+（1）在onBind中进行验证：
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        //onBind中验证权限
+        int check = checkCallingOrSelfPermission("com.example.saber.aidlbindertest.permission.ACCESS_BOOK_SERVICE");
+        if(check == PackageManager.PERMISSION_DENIED){
+            return null;
+        }
+
+        return mBinder;
+    }
+
+
+
+5.使用ContentProvider
 
 
 
 
 
 
+
+
+
+
+                            
 
 
 
