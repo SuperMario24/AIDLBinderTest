@@ -380,14 +380,119 @@ Binder的死亡代理，首先声明一个DeathRecipient对象，DeathRecipient�
 四.Android中的IPC方式
 
 
+1.使用Bundle
+
+四大组件中的三大组件（Activity，Service，Receiver）都是支持在Intent中传递Bundle数据的，由于Bundle实现了Parcelable接口，所以他可以方便的在
+不同进程中传输。
 
 
+2.使用文件共享
+
+文件共享也是一种不错的进程间通信的方式，两个进程通过读写一个文件来交换数据，比如A进程把数据写入文件，B进程通过读取这个文件来获取数据。文件共享
+除了可以交换一些文本信息外，我们还可以序列化一个对象到文件系统中的同时另一个进程中恢复这个对象，下面就展示这种使用方法。
+
+我们在MainActivity的onResume中序列化一个User对象到sd卡上的一个文件里，然后再SecondActivity的onResume中去反序列化这个对象：
+
+MainActivity：
+
+                 /**
+                 * 序列化对象，并写入文件
+                 */
+                private void persistToFile() {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+
+                            User user = new User(1,"hello world",false);
+                            File dir = new File(MyConstants.CHAPTER_2_PATH);
+                            if(!dir.exists()){
+                                dir.mkdirs();
+                            }
+
+                            File cachedFile = new File(MyConstants.CACHE_FILE_PATH);
+                            try {
+                                cachedFile.createNewFile();
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            ObjectOutputStream objectOutputStream = null;
+
+                            try {
+                                if(cachedFile.exists()){
+                                    objectOutputStream = new ObjectOutputStream(new FileOutputStream(cachedFile));
+                                    objectOutputStream.writeObject(user);
+                                    Log.d(TAG,"persist user:"+user);
+                                }
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }finally {
+                                if (objectOutputStream != null ){
+                                    try {
+                                        objectOutputStream.close();
+                                    } catch (IOException e) {
+                                        e.printStackTrace();
+                                    }
+                                }
+                            }
+                        }
+                    }).start();
+                }
+
+SecondActivity：
+
+                 /**
+                 * 反序列化对象，从文件中读取数据
+                 */
+                private void recoverFromFile() {
+
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            User user = null;
+                            File cachedFile = new File(MyConstants.CACHE_FILE_PATH);
+                            if(cachedFile.exists()){
+                                ObjectInputStream objectInputStream = null;
+                                try {
+                                    objectInputStream = new ObjectInputStream(new FileInputStream(cachedFile));
+                                    user = (User) objectInputStream.readObject();
+                                    Log.d(TAG, "recover user:"+user);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                } catch (ClassNotFoundException e) {
+                                    e.printStackTrace();
+                                }finally {
+                                    if(objectInputStream != null){
+                                        try {
+                                            objectInputStream.close();
+                                        } catch (IOException e) {
+                                            e.printStackTrace();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }).start();
+
+                }
+
+缺陷：存在并发读写的问题。包括SharePreferences。
 
 
+3.使用Messenger
 
+Messenger是一个轻量级的IPC方案，它的底层实现是AIDL。从它的构造方法就可以看出来：
 
+            public Messenger(Handler target){
+                 mTarget = target.getIMessenger();
+            }
+            public Messenger(IBinder target){
+                 mTarget = IMessenger.Stub.asInterface(target);
+            }
 
+Messenger的使用方法很简单，他对AIDL做了封装。同时，它由于一次处理一个请求，因此在服务端我们不用考虑线程同步的问题，因为服务端中不存在并发的情形，
+实现一个Messenger有如下几个步骤，分为服务端和客户端。
 
+1.服务端进程：
 
 
 
