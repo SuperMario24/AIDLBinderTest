@@ -926,6 +926,180 @@ listener删掉即可。另外RemoteCallbackList内部自动实现了线程同步
 
 5.使用ContentProvider
 
+ContentProvider的底层实现依然是Binder。
+
+创建一个自定义的Provider很简单，只要继承ContentProvider类并实现六个抽象方法即可：onCreate，query，update，insert，delete和getType。
+这六个方法都很好理解，onCreate代表ContentProvider的创建，一般做一些初始化的工作；getType用来返回一个Uri请求所对应的MIME类型（媒体类型），比如
+图片，视频等，剩下四个方法返回CRUD操作，即数据表的增删改查功能。根据Binder的工作原理，我们知道这六个方法均运行在ContentProvider的进程中，除了
+onCreate由系统回调运行在主线程里，其他五个方法都由外界回调，运行在Binder线程池中。
+
+注册ContentProvider：
+
+            <provider
+            android:name=".provider.BookProvider"
+            android:authorities="com.example.saber.aidlbindertest.book.provider"
+            android:permission="com.example.saber.PROVIDER"
+            android:process=":remote" />
+
+其中android：authorities是ContentProvider的唯一标识，通过这个属性，外部应用就可以访问我们的ContentProvider，因此android：authorities
+必须是唯一的，这里建议读者在命名的时候加上包名前缀。
+
+外界想访问我们的ContentProvider就必须声明"com.example.saber.PROVIDER"这个权限。
+
+其他进程访问它的时候，必须获取ContentProvider的android：authorities属性所指定的Uri：
+
+       Uri bookUri = Uri.parse("content://com.example.saber.aidlbindertest.book.provider/book");
+
+ContentProvider通过Uri来区分外界要访问的数据集合，在本例中支持外界对BookProvider中的book表和user表进行访问，为了知道外界要访问的是哪个表，我们
+需要为它们定义单独的Uri和Uri_Code，并将Uri和Uri_Code相关联，我们可以使用UriMatcher的addUri方法将Uri和Uri_Code关联到一起。这样，当外界请求访问
+BookProvider时，我们就可以根据请求的Uri来得到Uri_Code，有了Uri_Code我们就可以知道外界想要访问哪张表，然后就可以进行相应的数据操作了，具体代码
+如下：
+
+    public static final String AUTHORITY = "com.example.saber.aidlbindertest.book.provider";
+
+    //Uri来区分外界要访问的数据集合
+    public static final Uri BOOK_CONTENT_URI = Uri.parse("content://"+AUTHORITY+"/book");
+    public static final Uri USER_CONTENT_URI = Uri.parse("content://"+AUTHORITY+"/user");
+
+    public static final int BOOK_URI_CODE = 0;
+    public static final int USER_URI_CODE = 1;
+
+    private static final UriMatcher sUriMatcher = new UriMatcher(UriMatcher.NO_MATCH);
+
+    static {
+        sUriMatcher.addURI(AUTHORITY,"book",BOOK_URI_CODE);//第一个参数为provider的authority，第二个为path，表名，第三个为自定义的code
+        sUriMatcher.addURI(AUTHORITY,"user",USER_URI_CODE);
+    }
+
+将Uri和Uri_Code关联后，我们就可以通过如下方式来获取外界所要访问的数据源，根据Uri先取出Uri_Code，根据Uri_Code在得到数据表的名称，知道表名，就
+可以进行操作了：
+
+
+             public String getType(Uri uri) {
+                    Log.d(TAG,"getType");
+
+                    //返回要外界想要查询的数据，表名
+                    String tableName = null;
+                    switch (sUriMatcher.match(uri)){
+                        case BOOK_URI_CODE:
+                            tableName = DbOpenHelper.BOOK_TABLE_NAME;
+                            break;
+                        case USER_URI_CODE:
+                            tableName = DbOpenHelper.USER_TABLE_NAME;
+                            break;
+                    }
+                    return tableName;
+                }
+
+对ContentProvider所在进程做操作：
+
+        Uri bookUri = Uri.parse("content://com.example.saber.aidlbindertest.book.provider/book");
+
+        //插入
+        ContentValues values = new ContentValues();
+        values.put("_id", 6);
+        values.put("name", "程序设计的艺术");
+        getContentResolver().insert(bookUri, values);
+
+
+注意：CRUD操作是存在多线程并发的，应该做好同步操作。
+
+
+
+6.使用Socket
+
+
+Socket分为流式套接字和用户数据报套接字两种，分别对应于网络的传输控制层中的TCP和UDP协议。TCP协议是面向连接的协议，提供稳定的双向通信功能，
+TCP连接的建立需要经过“三次握手”才能完成，其本身提供了超时重传机制，具有很高的稳定性。
+UDP是无连接的，提供不稳定的单向通信功能，当然UDP也可以实现双向通信功能，在性能上，UDP具有更好的效率，其缺点是不能保证数据一定能够正确传输，尤其在
+网络拥塞的情况下。
+
+Socket实现跨进程通信的前提是这个设备之间的IP地址相互可见。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
