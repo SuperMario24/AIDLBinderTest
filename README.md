@@ -1021,20 +1021,273 @@ Socket实现跨进程通信的前提是这个设备之间的IP地址相互可见
 五.Binder连接池
 
 
+创建AIDL大致流程:
+（1）创建一个Service和一个AIDL接口
+（2）创建一个类继承自AIDL接口中的Stub类，并实现Stub中的抽象方法
+（3）在Service的onBind中返回这个类的对象
+（4）在客户端就可以绑定服务端Service，并调用其方法
 
 
+Binder连接池的核心思想：
+服务端提供一个queryBinder接口，这个接口能够根据业务模块需要返回对应的Binder对象给他们。
+
+（1）创建两个AIDL接口：
+
+            //提供加密解密功能
+            interface ISecurityCenter {
+                String encrypt(String content);
+                String decrypt(String password);
+            }
+            
+            //提供算法功能
+            interface ICompute {
+                int add(int a,int b);
+            }
+
+（1）创建两个实现类，继承AIDL接口中的Stub类
+
+            public class SecurityCenterImpl extends ISecurityCenter.Stub{
+                private static final char SECRET_CODE = '^';
+
+                @Override
+                public String encrypt(String content) throws RemoteException {
+
+                    char[] chars = content.toCharArray();
+                    for(int i=0;i<chars.length;i++){
+                        chars[i] ^= SECRET_CODE;
+                    }
+                    return new String(chars);
+                }
+
+                @Override
+                public String decrypt(String password) throws RemoteException {
+
+                    return encrypt(password);
+                }
+            }
 
 
+            public class ComputeImpl extends ICompute.Stub {
+                @Override
+                public int add(int a, int b) throws RemoteException {
+                    return a+b;
+                }
+            }
+
+（3）创建Binder连接池BinderPool，提供queryBinder方法，这也是一个AIDL接口：
+
+            interface IBinderPool {
+                //根据不同的业务需求去调用不同的binder
+                IBinder queryBinder(int binderCode);
+            }
+
+ 接着为Binder连接池创建远程Service并实现IBinderPool：
+ 
+             public class BinderPoolService extends Service {
+
+                private static final String TAG = "BinderPoolService";
+
+                private Binder mBinderPool = new BinderPool.BinderPoolImpl();
+
+                @Override
+                public void onCreate() {
+                    super.onCreate();
+                }
+
+                @Override
+                public IBinder onBind(Intent intent) {
+                    return mBinderPool;
+                }
+
+                @Override
+                public void onDestroy() {
+                    super.onDestroy();
+                }
+            }
+
+这个步骤比较简单，具体的BinderPool实现是在BinderPool类里，现在来创建它：
+
+            public class BinderPool {
+                private static final String TAG = "BinderPool";
+
+                public static final int BINDER_NONE = -1;
+                public static final int BINDER_COMPUTE = 0;
+                public static final int BINDER_SECURITY_CENTER = 1;
+
+                private Context mContext;
+                private IBinderPool mBinderPool;//AIDL类型的接口
+                private static volatile BinderPool sInstance;
+                //线程同步
+                private CountDownLatch mConnectBinderPoolCountDownLatch;
+
+                private BinderPool(Context context){
+                    mContext = context.getApplicationContext();
+                    connectBinderPoolService();
+                }
+
+                //获取BinderPool实例
+                public static BinderPool getInstance(Context context){
+                    if(sInstance == null){
+                        synchronized (BinderPool.class){
+                            if(sInstance == null){
+                                sInstance = new BinderPool(context);
+                            }
+                        }
+                    }
+                    return sInstance;
+                }
+
+                //绑定服务端成功
+                private ServiceConnection mBinderPoolConnection = new ServiceConnection() {
+                    @Override
+                    public void onServiceConnected(ComponentName name, IBinder service) {
+                        mBinderPool = IBinderPool.Stub.asInterface(service);
+
+                        try {
+                            mBinderPool.asBinder().linkToDeath(mBinderPoolDeathRecipient,0);
+                        } catch (RemoteException e) {
+                            e.printStackTrace();
+                        }
+
+                        mConnectBinderPoolCountDownLatch.countDown();
+                    }
+
+                    @Override
+                    public void onServiceDisconnected(ComponentName name) {
+                        Log.w(TAG,"connect failed");
+                    }
+                };
+
+                //设置BinderPool的死亡代理
+                private IBinder.DeathRecipient mBinderPoolDeathRecipient = new IBinder.DeathRecipient() {
+                    @Override
+                    public void binderDied() {
+                        Log.w(TAG,"binder died");
+                        mBinderPool.asBinder().unlinkToDeath(mBinderPoolDeathRecipient,0);
+                        mBinderPool = null;
+                        connectBinderPoolService();
+                    }
+                };
+
+                //与远程服务端绑定
+                private synchronized void connectBinderPoolService() {
+                    mConnectBinderPoolCountDownLatch = new CountDownLatch(1);
+                    Intent service = new Intent(mContext,BinderPoolService.class);
+                    mContext.bindService(service,mBinderPoolConnection,Context.BIND_AUTO_CREATE);
+
+                    try {
+                        //将于服务端绑定这一异步操作转换为同步操作
+                        mConnectBinderPoolCountDownLatch.await();
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
 
 
+                public IBinder queryBinder(int binderCode){
 
+                    IBinder binder = null;
+                    try {
+                        if (mBinderPool != null) {
+                            binder = mBinderPool.queryBinder(binderCode);
+                        }
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
+                    }
 
+                    return binder;
+                }
 
+                public static class BinderPoolImpl extends IBinderPool.Stub{
 
+                    public BinderPoolImpl() {
+                        super();
+                    }
 
+                    @Override
+                    public IBinder queryBinder(int binderCode) throws RemoteException {
 
+                        IBinder binder = null;
 
+                        switch (binderCode){
+                            case BINDER_SECURITY_CENTER:
+                                binder = new SecurityCenterImpl();
+                                break;
+                            case BINDER_COMPUTE:
+                                binder = new ComputeImpl();
+                                break;
+                        }
+                        return binder;
+                    }
+                }
+            }
 
+（4）在客户端中调用方法：
+
+            public class BInderPoolActivity extends AppCompatActivity {
+
+                private static final String TAG = "BInderPoolActivity";
+
+                //AIDL接口
+                private ISecurityCenter mSecurityCenter;
+                private ICompute mCompute;
+
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    setContentView(R.layout.activity_binder_pool);
+
+                    new Thread(){
+                        @Override
+                        public void run() {
+                            doWork();
+                        }
+                    }.start();
+                }
+
+                //通过BInderPool调用不同的binder对象
+                private void doWork() {
+                    BinderPool binderPool = BinderPool.getInstance(BInderPoolActivity.this);
+
+                    //根据binderCode获取对应的binder对象
+                    IBinder securityBinder = binderPool.queryBinder(BinderPool.BINDER_SECURITY_CENTER);
+                    //将binder对象转换成对应的AIDL接口
+                    mSecurityCenter = (ISecurityCenter)SecurityCenterImpl.asInterface(securityBinder);
+
+                    Log.d(TAG,"visit ISecurityCenter");
+                    String msg = "helloword-安卓";
+                    Log.d(TAG,"content加密前:"+msg);
+                    try {
+
+                        String password = mSecurityCenter.encrypt(msg);
+                        Log.d(TAG,"encrypt加密后:"+password);
+                        Log.d(TAG,"decrypt解密后:"+mSecurityCenter.decrypt(password));
+
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
+                    }
+
+                    Log.d(TAG,"visit ICompute");
+                    IBinder computeBinder = binderPool.queryBinder(BinderPool.BINDER_COMPUTE);
+                    mCompute = (ICompute)ComputeImpl.asInterface(computeBinder);
+
+                    try {
+                        Log.d(TAG,"3+5="+mCompute.add(3,5));
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+
+六.选择合适的IPC方式：
+
+Bunder：简单易用，但只能传输Bundle支持的数据类型，适用于四大组件间的进程通信。
+文件共享：简单易用，但不适合高并发的场景，适用于无并发访问的情形。
+AIDL：功能强大，支持一对多并发通信，支持实时通信，使用稍复杂，需要处理好线程同步，适用于一对多通信且有RPC需求。
+Messenger：功能一般，支持一对多串行通信，支持实时通信，当不能很好处理，高并发情形，数据通过Message传输，因此只能传输Bundle支持的数据类型。适用于
+低并发的一对多通信，无RPC需求。
+ContentProvider：在数据访问方面功能强大，支持一对多并发数据共享，可以理解为受约束的AIDL，主要是CRUD操作，适用于，一对多的进程间数据共享。
+Socket:功能强大，可以通过网络传输字节流，支持一对多并发实时通信，实现繁琐，不支持直接的RPC，适用于网络数据交换。
 
 
 
